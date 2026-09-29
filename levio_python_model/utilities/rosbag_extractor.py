@@ -13,6 +13,7 @@
 """
 import rosbag
 import numpy as np
+import cv2
 
 class IMUData:
     """Container for IMU measurements from a rosbag message.
@@ -74,10 +75,19 @@ class RosbagExtractor:
         Returns:
             np.ndarray: Grayscale image as 2D numpy array
         """
-        dtype = np.uint8  # mono8
-        image = np.frombuffer(msg.data, dtype=dtype)
-        image = image.reshape(msg.height, msg.width)
-        return image
+        encoding = msg.encoding.lower()
+        if encoding not in ('mono8', '8uc1', 'rgb8', 'bgr8', 'rgba8', 'bgra8'):
+            raise ValueError(f'Unsupported image encoding: {msg.encoding}')
+        channels = 1 if encoding in ('mono8', '8uc1') else (4 if 'a8' in encoding else 3)
+        row = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.step)
+        image = row[:, :msg.width * channels].reshape(msg.height, msg.width, channels)
+        if channels == 1:
+            return image[:, :, 0].copy()
+        conversion = {
+            'rgb8': cv2.COLOR_RGB2GRAY, 'bgr8': cv2.COLOR_BGR2GRAY,
+            'rgba8': cv2.COLOR_RGBA2GRAY, 'bgra8': cv2.COLOR_BGRA2GRAY,
+        }
+        return cv2.cvtColor(image, conversion[encoding])
 
     def img_generator(self):
         """Generator for camera images from rosbag.

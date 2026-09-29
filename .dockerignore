@@ -1,0 +1,7 @@
+**/*.bag
+research_data/
+research_results/
+data/
+sensor_data/
+.git/
+**/__pycache__/

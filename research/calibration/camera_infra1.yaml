@@ -1,0 +1,32 @@
+camera_name: camera_infra1
+manufacturer: Intel RealSense
+model: D435i
+topic: /camera/infra1/image_rect_raw
+camera_info_topic: /camera/infra1/camera_info
+frame_id: camera_infra1_optical_frame
+model_type: PINHOLE
+distortion_model: plumb_bob
+image_width: 640
+image_height: 480
+intrinsics:
+  fx: 380.23038427459284
+  fy: 381.1265029215647
+  cx: 320.6907544876677
+  cy: 242.3473400097656
+distortion_coefficients:
+  k1: 0.0035534305077957393
+  k2: -0.005453237129435213
+  p1: 0.00010675207504647932
+  p2: 0.0009528909894796479
+parent_frame: base_link
+child_frame: camera_infra1_optical_frame
+translation_xyz_m: [0.05222201, 0.0146902, -0.03623093]
+rotation_xyzw: [0.504800620292, -0.50040814354, 0.498536488757, -0.496215067294]
+transform_matrix_row_major:
+  rows: 4
+  cols: 4
+  data:
+    - [0.00210612, -0.01045005, 0.99994318, 0.05222201]
+    - [-0.99997532, -0.00672459, 0.00203591, 0.0146902]
+    - [0.00670294, -0.99992279, -0.01046396, -0.03623093]
+    - [0.0, 0.0, 0.0, 1.0]

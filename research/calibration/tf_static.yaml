@@ -1,0 +1,29 @@
+calibration_id: robot_v1_template
+conventions:
+  quaternion_xyzw: [x, y, z, w]
+  base_link: body frame
+frames:
+  base_link:
+    parent: world
+    translation_xyz_m: [0.0, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  mavros_imu_frame:
+    parent: base_link
+    topic: /mavros/imu/data
+    translation_xyz_m: [0.0, 0.0, 0.08]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  livox_frame:
+    parent: base_link
+    topic: /livox/lidar
+    translation_xyz_m: [0.0, 0.0, 0.0]
+    rotation_xyzw: [0.092295941, 0.092295941, 0.701057387, 0.701057387]
+  camera_infra1_optical_frame:
+    parent: base_link
+    topic: /camera/infra1/image_rect_raw
+    translation_xyz_m: [0.05222201, 0.0146902, -0.03623093]
+    rotation_xyzw: [0.504800620292, -0.50040814354, 0.498536488757, -0.496215067294]
+  camera_infra2_optical_frame:
+    parent: base_link
+    topic: /camera/infra2/image_rect_raw
+    translation_xyz_m: [0.05242354, -0.03531049, -0.03599585]
+    rotation_xyzw: [0.504898200667, -0.500781563884, 0.498419434249, -0.495856531468]

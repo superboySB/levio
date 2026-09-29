@@ -65,6 +65,10 @@ class VIOSystem():
         self.frontend = VO_frontend()
         self.vio_initializer = VisualInertialOdometryInitializer(self.graph.optimizer)
         self.parallax_kf = 0.1
+        self.draw_each_frame = True
+        self.skipped_essential_frames = 0
+        self.standing_start_time_shortcut = True
+        self.rewrite_first_timestamp = True
 
     def run_pipeline(self, rosbag_file, out_prefix):
         """Process a complete rosbag sequence and save results.
@@ -149,6 +153,12 @@ class VIOSystem():
         idx1, idx2, matches = self.frontend.get_matches(frame1, frame2, hamming_threshold=hamming_threshold)
         if bootstrap:
             Rt, E = self.frontend.get_pose_essential(frame1, idx1, frame2, idx2, self.K)
+            if Rt is None:
+                # Degenerate or insufficient feature geometry: retain the last
+                # keyframe pose and wait for an image with a valid pose estimate.
+                frame1.pose = frame2.pose.copy()
+                self.skipped_essential_frames += 1
+                return frame1.pose[:3, 3]
             keyframe_id = self.graph.keyframes[-1].id
             dt = frame1.t - frame2.t
             if keyframe_id > 5:
@@ -156,10 +166,11 @@ class VIOSystem():
                 Rt[:3,3] *=  dt * np.linalg.norm(v)
             else:
                 # Scale translation with time, due to lack of initial scale factor
-                if frame2.id == 0 and frame1.id > 10:
+                if frame2.id == 0 and frame1.id > 10 and self.standing_start_time_shortcut:
                     # Standing start
                     dt = 0.5
-                    frame2.t = frame1.t - dt
+                    if self.rewrite_first_timestamp:
+                        frame2.t = frame1.t - dt
                 Rt[:3,3] *=  dt
             frame1.pose = np.dot(Rt, frame2.pose)
 
@@ -218,8 +229,9 @@ class VIOSystem():
                 self.visualization.add_pose(x,y,z,(255,0,0))
             else:
                 self.visualization.add_pose(x,y,z)
-        self.visualization.update_frame(undist_image,frame1.kps)
-        self.visualization.draw()
+        if self.draw_each_frame:
+            self.visualization.update_frame(undist_image,frame1.kps)
+            self.visualization.draw()
 
         return frame1.pose[:3, 3]
 

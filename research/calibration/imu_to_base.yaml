@@ -1,0 +1,16 @@
+sensor: mavros_imu
+source_hardware:
+  flight_controller:
+    manufacturer: MicoAir
+    manufacturer_cn: 微空
+    model: NxtPX4V2
+    label_model: NXTPX4V2
+  imu:
+    manufacturer: Bosch Sensortec
+    model: BMI088
+    count: 2
+topic: /mavros/imu/data
+parent_frame: base_link
+child_frame: mavros_imu_frame
+translation_xyz_m: [0.0, 0.0, 0.08]
+rotation_xyzw: [0.0, 0.0, 0.0, 1.0]

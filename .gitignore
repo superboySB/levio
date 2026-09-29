@@ -7,6 +7,11 @@ dist/
 
 # Data & output
 data/
+research_data/
+research_results/
+*.bag
+*.bag.active
+*.bag.orig
 sensor_data/
 *.npy
 *.png

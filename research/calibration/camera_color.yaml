@@ -1,0 +1,17 @@
+camera_name: camera_color
+manufacturer: Intel RealSense
+model: D435i
+topic: /camera/color/image_raw
+camera_info_topic: /camera/color/camera_info
+frame_id: camera_color_optical_frame
+calibration_status: runtime_camera_info
+note: "Color intrinsics are published by the RealSense device on /camera/color/camera_info; no fixed color intrinsic YAML is provided here."
+image_width: null
+image_height: null
+distortion_model: null
+intrinsics:
+  fx: null
+  fy: null
+  cx: null
+  cy: null
+distortion_coefficients: []

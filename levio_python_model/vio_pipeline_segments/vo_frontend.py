@@ -66,6 +66,8 @@ class VO_frontend(object):
         """
         idx1 = []
         idx2 = []
+        if image1.des is None or image2.des is None:
+            return idx1, idx2, []
         matches = self.matcher.match(image1.des, image2.des)
         matches = sorted(matches, key = lambda x:x.distance)
         for match in matches:
@@ -105,6 +107,8 @@ class VO_frontend(object):
                     graph_des.append(prev_frame.des[pt.idxs[-1]])
             if len(graph_des) > req_graph_points:
                 break
+        if not graph_des or frame1.des is None:
+            return [], []
         graph_des = np.array(graph_des)
         matches = self.matcher.match(frame1.des, graph_des)
         matches = sorted(matches, key = lambda x:x.distance)
@@ -150,6 +154,8 @@ class VO_frontend(object):
             if len(graph_des) > req_graph_points:
                 break
             prev_keyframe_id = curr_keyframe.id
+        if not graph_des or frame1.des is None:
+            return [], []
         graph_des = np.array(graph_des)
         matches = self.matcher.match(frame1.des, graph_des)
         matches = sorted(matches, key = lambda x:x.distance)
@@ -164,11 +170,18 @@ class VO_frontend(object):
 
     def get_pose_essential(self, image1, idx1, image2, idx2, K):
         Rt = np.eye(4)
-        E, mask = cv2.findEssentialMat(image1.kps[idx1], image2.kps[idx2], K, cv2.RANSAC)
+        if len(idx1) < 8:
+            return None, None
+        try:
+            E, mask = cv2.findEssentialMat(image1.kps[idx1], image2.kps[idx2], K, cv2.RANSAC)
+            if E is None or mask is None or np.count_nonzero(mask) < 5:
+                return None, None
             # Use the mask to select only inlier matches
-        pts1_inliers = image1.kps[idx1][mask.ravel() == 1]
-        pts2_inliers = image2.kps[idx2][mask.ravel() == 1]
-        _, rot, trans, mask = cv2.recoverPose(E, pts1_inliers, pts2_inliers, K)
+            pts1_inliers = image1.kps[idx1][mask.ravel() == 1]
+            pts2_inliers = image2.kps[idx2][mask.ravel() == 1]
+            _, rot, trans, mask = cv2.recoverPose(E, pts1_inliers, pts2_inliers, K)
+        except cv2.error:
+            return None, None
         Rt[:3, :3] = rot
         Rt[:3, 3] = trans.squeeze()
         return np.linalg.inv(Rt), E
@@ -216,6 +229,8 @@ class VO_frontend(object):
         return np.sum(error**2)
 
     def check_parallax(self, frame1, idx1, frame2, idx2, K):
+        if not idx1:
+            return 0.0
         relative_parallax = (frame1.kps[idx1]-frame2.kps[idx2])
         relative_parallax[:,0] = relative_parallax[:,0]/K[0,0]
         relative_parallax[:,1] = relative_parallax[:,1]/K[1,1]

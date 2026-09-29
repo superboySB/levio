@@ -29,6 +29,7 @@ class VisualInertialOdometryInitializer():
         self.optimizer = optimizer
         self.is_time_synced = False
         self.is_standing_start = False
+        self.allow_standing_start = True
         self.delta_ps = []
         self.g = 9.81
         gravity = np.array([0.0, self.g, 0.0])
@@ -125,7 +126,7 @@ class VisualInertialOdometryInitializer():
             # Integrate values prior to first value
             accumulate = self.optimizer.preintegrate_imu(None, graph.keyframes[0])
             self.is_time_synced = True
-            if graph.keyframes[1].id > 10:
+            if graph.keyframes[1].id > 10 and self.allow_standing_start:
                 self.is_standing_start = True
                 self.set_gravity([accumulate.deltaVij()])
                 self.optimizer.gravity = self.gravity_vector
