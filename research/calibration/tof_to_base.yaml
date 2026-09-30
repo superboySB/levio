@@ -1,0 +1,19 @@
+sensor: nlink_tofsensem_cascade
+manufacturer: Nooploop
+model: TOFSense-M
+sensor_type: time_of_flight_matrix_laser_ranger
+topic: /nlink_tofsensem_cascade
+ros_message_type: nlink_parser/TofsenseMCascade
+collection_configuration:
+  interface: UART
+  output_mode: query
+  cascade_nodes: 6
+  pixel_mode: 8x8
+  pixels_per_node: 64
+  expected_pixels_per_message: 384
+parent_frame: base_link
+child_frame: tof_frame
+calibration_status: unavailable
+note: "No fixed ToF-to-body extrinsic is provided in this dataset version."
+translation_xyz_m: null
+rotation_xyzw: null

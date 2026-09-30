@@ -15,6 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import cv2
 import rosbag
 import yaml
 from scipy.spatial.transform import Rotation
@@ -279,6 +280,10 @@ def run(args):
         system.graph.optimizer.imu_to_cam_tf = np.linalg.inv(T_base_camera)
         system.graph.optimizer.set_imu_data_loader(extractor.imu_generator())
         system.visualization = TrajectoryVisualizer(800, 800, 400, 400, name=args.camera)
+        # Optional input-only control. The baseline is the unmodified grayscale
+        # image produced by RosbagExtractor; EuRoC and odom use the same code.
+        clahe = (cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                 if args.clahe else None)
 
         failure = None
         processed = 0
@@ -313,9 +318,15 @@ def run(args):
             if args.max_frames and processed >= args.max_frames:
                 break
             try:
+                if clahe is not None:
+                    image = clahe.apply(image)
                 was_initialized = system.graph.is_initialized
                 skipped_before = system.skipped_essential_frames
-                system.process_frame(image, stamp)
+                # A sensitivity control for the image time consumed by VIO.
+                # Online export and recorded-reference matching keep the
+                # unmodified camera capture stamp below.
+                model_stamp = stamp + args.camera_imu_offset_ms / 1000.0
+                system.process_frame(image, model_stamp)
                 if not was_initialized and system.graph.is_initialized:
                     initialization_frame = processed
                 if (first_essential_skip_frame is None and
@@ -405,6 +416,10 @@ def run(args):
             'max_adjacent_pair_age_s': args.max_adjacent_pair_age_s
                 if args.adjacent_recovery else None,
             'bootstrap_scale_until_initialized': args.bootstrap_scale_until_initialized,
+            'clahe': args.clahe,
+            'clahe_clip_limit': 2.0 if args.clahe else None,
+            'clahe_tile_grid': [8, 8] if args.clahe else None,
+            'camera_imu_offset_ms': args.camera_imu_offset_ms,
             'reference_frame_id': first_reference.header.frame_id,
             'reference_child_frame_id': first_reference.child_frame_id,
             'reference_publishers': reference_callers,
@@ -470,6 +485,10 @@ if __name__ == '__main__':
                         help='Maximum age of the nearby posed frame used by E')
     parser.add_argument('--bootstrap-scale-until-initialized', action='store_true',
                         help='Research variant: use dt rather than zero previous velocity before VIO initialization')
+    parser.add_argument('--clahe', action='store_true',
+                        help='Research variant: CLAHE grayscale input (clip 2.0, 8x8 tiles)')
+    parser.add_argument('--camera-imu-offset-ms', type=float, default=0.0,
+                        help='Research sensitivity: add milliseconds to image time seen by VIO only')
     parser.add_argument('--retain-edge-frames', action='store_true',
                         help='Diagnostic: disable the shared RGB/IMU/reference interval trim')
     parser.add_argument('--output', required=True)
