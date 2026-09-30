@@ -3,7 +3,9 @@
 import json
 from pathlib import Path
 
-RUNS = ['run009', 'run003', 'run005', 'run007', 'run002', 'run010']
+RUNS = [line.split('\t')[0] for line in
+        Path('research/metadata/bags.tsv').read_text().splitlines()
+        if line and not line.startswith('#') and line.endswith('\tdefault')]
 
 print('| Bag | Frames | Init frame | Skipped E | Matched | First-pose RMSE (m) | End error (m) | EDR (%) | Path ratio | Status |')
 print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---|')

@@ -170,16 +170,20 @@ class VO_frontend(object):
 
     def get_pose_essential(self, image1, idx1, image2, idx2, K):
         Rt = np.eye(4)
+        # Research safety gate: main called OpenCV without a match-count guard.
+        # OpenCV may return stacked candidates; recoverPose expects one E.
         if len(idx1) < 8:
             return None, None
         try:
             E, mask = cv2.findEssentialMat(image1.kps[idx1], image2.kps[idx2], K, cv2.RANSAC)
-            if E is None or mask is None or np.count_nonzero(mask) < 5:
+            if (E is None or E.shape != (3, 3) or mask is None or
+                    np.count_nonzero(mask) < 5):
                 return None, None
             # Use the mask to select only inlier matches
             pts1_inliers = image1.kps[idx1][mask.ravel() == 1]
             pts2_inliers = image2.kps[idx2][mask.ravel() == 1]
-            _, rot, trans, mask = cv2.recoverPose(E, pts1_inliers, pts2_inliers, K)
+            _, rot, trans, mask = cv2.recoverPose(
+                E, pts1_inliers, pts2_inliers, K)
         except cv2.error:
             return None, None
         Rt[:3, :3] = rot

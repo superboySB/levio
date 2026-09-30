@@ -69,6 +69,14 @@ class VIOSystem():
         self.skipped_essential_frames = 0
         self.standing_start_time_shortcut = True
         self.rewrite_first_timestamp = True
+        # Research controls are opt-in. Keeping both disabled preserves the
+        # original EuRoC/main-branch path through process_frame.
+        self.adjacent_recovery_max_keyframe_age_s = None
+        self.adjacent_recovery_max_pair_age_s = 0.12
+        self.bootstrap_scale_until_initialized = False
+        self.last_valid_pose_frame = None
+        self.current_pose_valid = True
+        self.last_pair_event = None
 
     def run_pipeline(self, rosbag_file, out_prefix):
         """Process a complete rosbag sequence and save results.
@@ -133,9 +141,27 @@ class VIOSystem():
         if frame.id == 0:
             self.graph.add_keyframe(frame)
             self.graph.keyframes[-1].is_keyframe = True
+            if (self.adjacent_recovery_max_keyframe_age_s is not None or
+                    self.bootstrap_scale_until_initialized):
+                self.last_valid_pose_frame = frame
+                self.last_pair_event = {
+                    'frame_id': frame.id, 'reference_frame_id': frame.id,
+                    'reference_age_s': 0.0, 'reference_is_keyframe': True,
+                    'pose_valid': True, 'decision': 'first_frame',
+                }
             return 0, 0, 0
         frame1 = self.graph.frames[-1]
         frame2 = self.graph.keyframes[-1]
+        recovery_enabled = self.adjacent_recovery_max_keyframe_age_s is not None
+        diagnostic_enabled = recovery_enabled or self.bootstrap_scale_until_initialized
+        if diagnostic_enabled:
+            self.current_pose_valid = False
+            self.last_pair_event = {
+                'frame_id': frame1.id, 'reference_frame_id': frame2.id,
+                'reference_age_s': frame1.t - frame2.t,
+                'reference_is_keyframe': True, 'pose_valid': False,
+                'decision': 'pending',
+            }
 
         if (len(self.graph.keyframes) > 1 and self.use_epnp):
             if (len(self.graph.keyframes) > 5):
@@ -147,10 +173,43 @@ class VIOSystem():
         else:
             bootstrap = True
 
+        recovery_source = False
+        if (recovery_enabled and bootstrap and
+                frame1.t - frame2.t > self.adjacent_recovery_max_keyframe_age_s):
+            recent = self.last_valid_pose_frame
+            recent_age = frame1.t - recent.t if recent is not None else np.inf
+            if (recent is None or recent is frame2 or recent_age <= 0 or
+                    recent_age > self.adjacent_recovery_max_pair_age_s):
+                # An old keyframe cannot establish the unobserved motion across
+                # a visual outage. Keep the frame explicitly invalid rather
+                # than estimating E against an arbitrarily distant image.
+                frame1.pose = frame2.pose.copy()
+                self.skipped_essential_frames += 1
+                self.last_pair_event.update({
+                    'reference_frame_id': None, 'reference_age_s': None,
+                    'reference_is_keyframe': None,
+                    'decision': 'no_recent_valid_pose',
+                })
+                return frame1.pose[:3, 3]
+            frame2 = recent
+            recovery_source = True
+            self.last_pair_event.update({
+                'reference_frame_id': frame2.id,
+                'reference_age_s': recent_age,
+                'reference_is_keyframe': frame2.is_keyframe,
+                'decision': 'recent_valid_frame',
+            })
+
         hamming_threshold = 90
         if self.use_epnp:
             hamming_threshold = 30
         idx1, idx2, matches = self.frontend.get_matches(frame1, frame2, hamming_threshold=hamming_threshold)
+        if diagnostic_enabled:
+            self.last_pair_event.update({
+                'matches_hamming_threshold': len(idx1),
+                'pnp_accepted_by_model': not bootstrap,
+                'essential_attempted': bootstrap,
+            })
         if bootstrap:
             Rt, E = self.frontend.get_pose_essential(frame1, idx1, frame2, idx2, self.K)
             if Rt is None:
@@ -158,12 +217,18 @@ class VIOSystem():
                 # keyframe pose and wait for an image with a valid pose estimate.
                 frame1.pose = frame2.pose.copy()
                 self.skipped_essential_frames += 1
+                if diagnostic_enabled:
+                    self.last_pair_event['decision'] = 'essential_failed'
+                    self.last_pair_event['essential_succeeded'] = False
                 return frame1.pose[:3, 3]
             keyframe_id = self.graph.keyframes[-1].id
             dt = frame1.t - frame2.t
-            if keyframe_id > 5:
+            if keyframe_id > 5 and not (
+                    self.bootstrap_scale_until_initialized and
+                    not self.graph.is_initialized):
                 v = self.graph.optimizer.previous_velocity
-                Rt[:3,3] *=  dt * np.linalg.norm(v)
+                scale_factor = dt * np.linalg.norm(v)
+                Rt[:3,3] *= scale_factor
             else:
                 # Scale translation with time, due to lack of initial scale factor
                 if frame2.id == 0 and frame1.id > 10 and self.standing_start_time_shortcut:
@@ -171,8 +236,16 @@ class VIOSystem():
                     dt = 0.5
                     if self.rewrite_first_timestamp:
                         frame2.t = frame1.t - dt
-                Rt[:3,3] *=  dt
+                scale_factor = dt
+                Rt[:3,3] *= scale_factor
             frame1.pose = np.dot(Rt, frame2.pose)
+            if diagnostic_enabled:
+                self.last_pair_event.update({
+                    'essential_succeeded': True,
+                    'essential_translation_scale': float(scale_factor),
+                    'previous_velocity_norm': float(np.linalg.norm(
+                        self.graph.optimizer.previous_velocity)),
+                })
 
         # Add new observations of existing points
         for index1, index2 in zip(idx1, idx2):
@@ -185,6 +258,11 @@ class VIOSystem():
 
         # Check for keyframe
         keyframe = (self.frontend.check_parallax(frame1, idx1, frame2, idx2, self.K) > self.parallax_kf) or not self.use_keyframes
+        if recovery_source:
+            # Record the recovered pose as the new visual anchor. The prior
+            # frame need not become a keyframe, which would break the existing
+            # IMU preintegration schedule in the initializer.
+            keyframe = True
         if keyframe:
             self.graph.add_keyframe(frame1)
             self.graph.keyframes[-1].is_keyframe = True
@@ -232,6 +310,16 @@ class VIOSystem():
         if self.draw_each_frame:
             self.visualization.update_frame(undist_image,frame1.kps)
             self.visualization.draw()
+
+        if diagnostic_enabled:
+            self.current_pose_valid = True
+            self.last_valid_pose_frame = frame1
+            self.last_pair_event.update({
+                'pose_valid': True,
+                'forced_keyframe': recovery_source,
+                'decision': 'recovered_adjacent_pose' if recovery_source else
+                            ('pnp_pose' if not bootstrap else 'essential_pose'),
+            })
 
         return frame1.pose[:3, 3]
 

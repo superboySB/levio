@@ -13,8 +13,12 @@ from run_odom import bag_calibration, reference_poses
 def run(args):
     with rosbag.Bag(args.bag) as bag:
         topic, _, _, _, T_base_camera = bag_calibration(bag, args.camera)
-        first_image_t = next(bag.read_messages(topics=[topic]))[1].header.stamp.to_sec()
+        raw_first_image_t = next(bag.read_messages(topics=[topic]))[1].header.stamp.to_sec()
         ref_t, ref_xyz = reference_poses(bag, T_base_camera)
+    capture_times = np.atleast_1d(np.loadtxt(Path(args.run_dir) / 'capture_times.txt'))
+    if len(capture_times) < 2:
+        raise ValueError('At least two processed RGB capture times are required')
+    first_image_t = float(capture_times[0])
     keyframes = np.loadtxt(Path(args.run_dir) / 'keyframes.tum', comments='#')
     if keyframes.ndim == 1 or len(keyframes) < 2:
         raise ValueError('At least two keyframes are required')
@@ -26,7 +30,9 @@ def run(args):
     segment = ref_xyz[first_ref:last_ref + 1]
     report = {
         'bag': args.bag, 'run_dir': args.run_dir,
-        'original_first_image_timestamp_s': first_image_t,
+        'raw_first_image_timestamp_s': raw_first_image_t,
+        'first_processed_image_timestamp_s': first_image_t,
+        'raw_to_processed_first_image_s': first_image_t - raw_first_image_t,
         'stored_first_keyframe_timestamp_s': rewritten_first_t,
         'second_keyframe_timestamp_s': second_t,
         'actual_first_to_second_keyframe_s': second_t - first_image_t,

@@ -5,9 +5,13 @@ and the selected bag. The resulting trajectory and diagnostics go to --output.
 """
 
 import argparse
+import csv
+import importlib.util
 import json
+import os
 import sys
 import traceback
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -16,12 +20,25 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'levio_python_model'))
+MODEL_DIR = Path(os.environ.get('LEVIO_MODEL_DIR', ROOT / 'levio_python_model'))
+sys.path.insert(0, str(MODEL_DIR))
 from main_levio import VIOSystem  # noqa: E402
 from utilities.draw_trajectory import TrajectoryVisualizer  # noqa: E402
-from utilities.rosbag_extractor import RosbagExtractor  # noqa: E402
+from utilities.rosbag_extractor import RosbagExtractor as ModelRosbagExtractor  # noqa: E402
 from runtime_trace import RuntimeMatchTrace  # noqa: E402
 from online_trajectory import OnlineTrajectory  # noqa: E402
+
+# The original EuRoC extractor accepts only mono8. For the upstream model
+# control, keep the same RGB-to-gray input adapter as the research baseline;
+# model feature, initialization and optimization code still comes from main.
+if MODEL_DIR.resolve() != (ROOT / 'levio_python_model').resolve():
+    adapter_path = ROOT / 'levio_python_model/utilities/rosbag_extractor.py'
+    adapter_spec = importlib.util.spec_from_file_location('levio_rgb_input_adapter', adapter_path)
+    adapter_module = importlib.util.module_from_spec(adapter_spec)
+    adapter_spec.loader.exec_module(adapter_module)
+    RosbagExtractor = adapter_module.RosbagExtractor
+else:
+    RosbagExtractor = ModelRosbagExtractor
 
 CAMERAS = {
     'color': ('/camera/color/image_raw', '/camera/color/camera_info', 'camera_color_optical_frame'),
@@ -49,7 +66,11 @@ def bag_calibration(bag, camera):
     K = np.array(info.K).reshape(3, 3)
     D = np.array(info.D)
     for _, other, _ in infos[1:]:
-        if not np.allclose(K, np.array(other.K).reshape(3, 3)) or not np.allclose(D, other.D):
+        if (other.header.frame_id != optical_frame or
+                other.distortion_model != info.distortion_model or
+                other.width != info.width or other.height != info.height or
+                not np.allclose(K, np.array(other.K).reshape(3, 3)) or
+                not np.allclose(D, other.D)):
             raise ValueError('Camera calibration changed within the bag')
 
     # The bag's RealSense TF tree is rooted at camera_link, not base_link.
@@ -61,8 +82,13 @@ def bag_calibration(bag, camera):
         for stamped in message.transforms:
             t = stamped.transform.translation
             q = stamped.transform.rotation
-            edges[(stamped.header.frame_id, stamped.child_frame_id)] = matrix(
+            edge_key = (stamped.header.frame_id, stamped.child_frame_id)
+            edge_transform = matrix(
                 [t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
+            if edge_key in edges and not np.allclose(
+                    edges[edge_key], edge_transform, rtol=0, atol=1e-8):
+                raise ValueError(f'Conflicting /tf_static transform: {edge_key}')
+            edges[edge_key] = edge_transform
 
     def camera_link_to(target):
         from collections import deque
@@ -111,18 +137,26 @@ def aligned_trajectories(image_t, estimates, reference_t, reference_xyz,
                          estimate_rotations=None, reference_rotations=None):
     """Match capture times and compute both global and start-anchored SE(3) fits."""
     if len(image_t) < 2 or len(reference_t) < 2:
-        return None, {'matched_frames': 0}
+        return None, {'candidate_frames': len(image_t), 'matched_frames': 0}
     image_t = np.asarray(image_t)
     estimates = np.asarray(estimates)
+    reference_t = np.asarray(reference_t)
     if len(image_t) != len(estimates):
         raise ValueError('Capture timestamp count differs from pose count')
+    if np.any(np.diff(image_t) <= 0):
+        raise ValueError('Capture timestamps must be strictly increasing')
+    if np.any(np.diff(reference_t) < 0):
+        raise ValueError('Reference timestamps must be nondecreasing')
     indexes = np.searchsorted(reference_t, image_t)
     indexes = np.clip(indexes, 1, len(reference_t) - 1)
     indexes -= np.abs(reference_t[indexes - 1] - image_t) < np.abs(reference_t[indexes] - image_t)
     valid = np.abs(reference_t[indexes] - image_t) <= 0.02
     est, ref = estimates[valid], reference_xyz[indexes[valid]]
+    matched = int(len(est))
+    coverage = {'candidate_frames': int(len(image_t)), 'matched_frames': matched,
+                'matched_fraction': matched / len(image_t)}
     if len(est) < 3:
-        return None, {'matched_frames': int(len(est))}
+        return None, coverage
     # Row-vector Kabsch: global translation minimizes total squared error.
     X, Y = est - est.mean(axis=0), ref - ref.mean(axis=0)
     U, _, Vt = np.linalg.svd(X.T @ Y)
@@ -133,7 +167,9 @@ def aligned_trajectories(image_t, estimates, reference_t, reference_xyz,
     estimate_length = float(np.linalg.norm(np.diff(est, axis=0), axis=1).sum())
     reference_length = float(np.linalg.norm(np.diff(ref, axis=0), axis=1).sum())
     metrics = {
-        'matched_frames': int(len(est)),
+        **coverage,
+        'matched_time_span_s': float(image_t[valid][-1] - image_t[valid][0]),
+        'max_matched_frame_gap_s': float(np.max(np.diff(image_t[valid]))),
         'max_sync_error_ms': float(1000 * np.max(np.abs(reference_t[indexes[valid]] - image_t[valid]))),
         'se3_aligned_ate_rmse_m': float(np.sqrt(np.mean(np.sum((global_fit - ref) ** 2, axis=1)))),
         'start_anchored_rmse_m': float(np.sqrt(np.mean(np.sum((start_fit - ref) ** 2, axis=1)))),
@@ -186,7 +222,14 @@ def run(args):
     (output / 'failure.txt').unlink(missing_ok=True)
     with rosbag.Bag(args.bag) as bag:
         image_topic, info, K, D, T_base_camera = bag_calibration(bag, args.camera)
-        first_imu = next(bag.read_messages(topics=[args.imu_topic]))[1]
+        first_imu = None
+        last_imu = None
+        for _, imu_message, _ in bag.read_messages(topics=[args.imu_topic]):
+            if first_imu is None:
+                first_imu = imu_message
+            last_imu = imu_message
+        if first_imu is None:
+            raise ValueError(f'Missing IMU topic: {args.imu_topic}')
         first_reference = next(bag.read_messages(topics=[ODOM_TOPIC]))[1]
         topic_info = bag.get_type_and_topic_info().topics
         reference_callers = sorted({
@@ -198,12 +241,33 @@ def run(args):
             raise ValueError(f'Expected base_link IMU, got {first_imu.header.frame_id}')
         reference_t, reference_xyz, reference_rotations = reference_poses(
             bag, T_base_camera, with_rotations=True)
+        common_start = max(first_imu.header.stamp.to_sec(), reference_t[0])
+        common_end = min(last_imu.header.stamp.to_sec(), reference_t[-1])
+        if common_end <= common_start:
+            raise ValueError('No shared RGB, IMU, and reference time interval')
         extractor = RosbagExtractor(args.bag, image_topic, args.imu_topic)
         system = VIOSystem()
+        # Upstream main predates these wrapper-visible diagnostics and optional
+        # ablation switches. Set inert defaults for the source comparison;
+        # upstream process_frame does not read any of these added attributes.
+        if not hasattr(system, 'skipped_essential_frames'):
+            system.skipped_essential_frames = 0
+        if not hasattr(system, 'standing_start_time_shortcut'):
+            system.standing_start_time_shortcut = True
+        if not hasattr(system, 'rewrite_first_timestamp'):
+            system.rewrite_first_timestamp = True
         trace = RuntimeMatchTrace(system) if args.trace_output else None
         online = OnlineTrajectory()
+        diagnostic_variant = (args.adjacent_recovery or
+                              args.bootstrap_scale_until_initialized)
+        valid_online = OnlineTrajectory() if diagnostic_variant else None
+        pair_events = []
         system.use_optimization = not args.disable_optimization
         system.rewrite_first_timestamp = not args.preserve_first_timestamp
+        if args.adjacent_recovery:
+            system.adjacent_recovery_max_keyframe_age_s = args.max_keyframe_age_s
+            system.adjacent_recovery_max_pair_age_s = args.max_adjacent_pair_age_s
+        system.bootstrap_scale_until_initialized = args.bootstrap_scale_until_initialized
         if args.general_initialization:
             system.standing_start_time_shortcut = False
             system.rewrite_first_timestamp = False
@@ -222,7 +286,21 @@ def run(args):
         initialization_frame = None
         first_essential_skip_frame = None
         next_camera_time = None
+        trimmed_start_images = 0
+        trimmed_end_images = 0
+        outside_common_start_images = 0
+        outside_common_end_images = 0
         for source_index, (image, stamp) in enumerate(extractor.img_generator()):
+            if stamp < common_start:
+                outside_common_start_images += 1
+                if not args.retain_edge_frames:
+                    trimmed_start_images += 1
+                    continue
+            if stamp > common_end:
+                outside_common_end_images += 1
+                if not args.retain_edge_frames:
+                    trimmed_end_images += 1
+                    continue
             if source_index % args.frame_step:
                 continue
             if args.target_fps:
@@ -246,6 +324,11 @@ def run(args):
                 processed += 1
                 capture_times.append(stamp)
                 online.record(system.graph.frames[-1], stamp)
+                if diagnostic_variant:
+                    event = {'capture_time_s': stamp, **system.last_pair_event}
+                    pair_events.append(event)
+                    if system.current_pose_valid:
+                        valid_online.record(system.graph.frames[-1], stamp)
                 if trace is not None:
                     trace.record(stamp)
             except Exception:
@@ -260,6 +343,18 @@ def run(args):
         visualizer.save_stamped_poses_to_file(system.graph.keyframes, str(output / 'keyframes.tum'))
         visualizer.save_trajectory_visualization_to_file(str(output / 'trajectory.png'))
         online.save(output / 'online_frames.tum')
+        if diagnostic_variant:
+            valid_online.save(output / 'valid_pose_frames.tum')
+            fields = ('capture_time_s', 'frame_id', 'reference_frame_id',
+                      'reference_age_s', 'reference_is_keyframe',
+                      'matches_hamming_threshold', 'pnp_accepted_by_model',
+                      'essential_attempted', 'essential_succeeded',
+                      'essential_translation_scale', 'previous_velocity_norm',
+                      'pose_valid', 'forced_keyframe', 'decision')
+            with (output / 'pair_selection_trace.csv').open('w', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(pair_events)
         np.savetxt(output / 'capture_times.txt', capture_times, fmt='%.9f')
         whole_timing = aligned_trajectories(
             online.times, online.positions, reference_t, reference_xyz,
@@ -283,7 +378,17 @@ def run(args):
             reference_t, reference_xyz,
             online.rotations[metric_start:metric_end],
             reference_rotations)[1]
+        valid_metric_window = (valid_metric_window and
+                               initialized_comparison['matched_frames'] >= 3)
         initialized_comparison['metric_scale_valid'] = valid_metric_window
+        if not valid_metric_window:
+            if initialization_frame is None:
+                reason = 'visual-inertial scale not initialized'
+            elif initialization_frame >= metric_end:
+                reason = 'no initialized interval before first essential failure'
+            else:
+                reason = 'fewer than three timestamp-matched post-initialization poses'
+            initialized_comparison['reason'] = reason
         initialized_comparison['stops_before_first_essential_failure'] = (
             first_essential_skip_frame is not None and valid_metric_window)
         report = {
@@ -294,6 +399,12 @@ def run(args):
             'optimization_enabled': not args.disable_optimization,
             'preserve_first_timestamp': not system.rewrite_first_timestamp,
             'general_initialization': args.general_initialization,
+            'adjacent_recovery': args.adjacent_recovery,
+            'max_keyframe_age_s': args.max_keyframe_age_s
+                if args.adjacent_recovery else None,
+            'max_adjacent_pair_age_s': args.max_adjacent_pair_age_s
+                if args.adjacent_recovery else None,
+            'bootstrap_scale_until_initialized': args.bootstrap_scale_until_initialized,
             'reference_frame_id': first_reference.header.frame_id,
             'reference_child_frame_id': first_reference.child_frame_id,
             'reference_publishers': reference_callers,
@@ -314,6 +425,22 @@ def run(args):
             'initialization_frame': initialization_frame,
             'failure': failure.strip().splitlines()[-1] if failure else None,
             'capture_time_source': 'original ROS image header.stamp before VIO mutation',
+            'input_common_interval_header_s': [common_start, common_end],
+            'input_rgb_trimmed_start_images': trimmed_start_images,
+            'input_rgb_trimmed_end_images': trimmed_end_images,
+            'input_rgb_outside_common_start_images': outside_common_start_images,
+            'input_rgb_outside_common_end_images': outside_common_end_images,
+            'input_common_interval_filter_applied': not args.retain_edge_frames,
+            'diagnostic_valid_pose_frames': len(valid_online.times)
+                if diagnostic_variant else None,
+            'diagnostic_pair_decisions': dict(Counter(
+                event['decision'] for event in pair_events))
+                if diagnostic_variant else None,
+            'diagnostic_max_essential_reference_age_s': max(
+                (event['reference_age_s'] for event in pair_events
+                 if event.get('essential_attempted') and
+                 event.get('reference_age_s') is not None), default=None)
+                if diagnostic_variant else None,
             'evaluated_trajectory': 'online_frames.tum: pose copied after each processed frame',
             'comparison_to_recorded_odometry': whole_comparison,
             'comparison_after_initialization': initialized_comparison,
@@ -335,6 +462,16 @@ if __name__ == '__main__':
                         help='Ablate the original standing-start timestamp rewrite')
     parser.add_argument('--general-initialization', action='store_true',
                         help='Ablate both standing-start shortcuts and solve initial velocity')
+    parser.add_argument('--adjacent-recovery', action='store_true',
+                        help='Research variant: cap the E reference age and use a recent posed input frame')
+    parser.add_argument('--max-keyframe-age-s', type=float, default=0.25,
+                        help='Select a nearby posed frame if the last keyframe is older than this')
+    parser.add_argument('--max-adjacent-pair-age-s', type=float, default=0.12,
+                        help='Maximum age of the nearby posed frame used by E')
+    parser.add_argument('--bootstrap-scale-until-initialized', action='store_true',
+                        help='Research variant: use dt rather than zero previous velocity before VIO initialization')
+    parser.add_argument('--retain-edge-frames', action='store_true',
+                        help='Diagnostic: disable the shared RGB/IMU/reference interval trim')
     parser.add_argument('--output', required=True)
     parser.add_argument('--trace-output', help='Optional CSV of actual runtime match pairs')
     parser.add_argument('--max-frames', type=int, default=0, help='0 means all frames')
@@ -348,4 +485,6 @@ if __name__ == '__main__':
         parser.error('--target-fps must be positive')
     if args.target_fps is not None and args.frame_step != 1:
         parser.error('--target-fps and --frame-step cannot be combined')
+    if args.max_keyframe_age_s <= 0 or args.max_adjacent_pair_age_s <= 0:
+        parser.error('recovery age bounds must be positive')
     raise SystemExit(run(args))

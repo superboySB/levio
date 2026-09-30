@@ -2,8 +2,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+upstream_commit='00d925f166bff859496fbda85049b2ce68bf7aa1'
+if ! git cat-file -e "${upstream_commit}^{commit}" 2>/dev/null; then
+  echo "Missing original commit $upstream_commit; use a full git clone" >&2
+  exit 1
+fi
+if [[ ! -s research_results/MH01_euroc_full/online_frames.tum ]]; then
+  echo 'Missing full EuRoC control; run research/run_euroc.py first' >&2
+  exit 1
+fi
+rm -rf -- research_results/upstream_source
 mkdir -p research_results/upstream_source research_data
-git archive 00d925f166bff859496fbda85049b2ce68bf7aa1 \
+git archive "$upstream_commit" \
   levio_python_model | tar -x -C research_results/upstream_source
 uid_gid="$(id -u):$(id -g)"
 model='/workspace/levio/research_results/upstream_source/levio_python_model'

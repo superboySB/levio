@@ -40,7 +40,7 @@ def draw_uninitialized(run_dir, output, summary, preview_png=None):
                              layout='constrained')
     axes[0].plot(times, matches, color='#245a9b', lw=1.1)
     axes[0].axhline(8, color='#555555', ls='--', lw=1,
-                    label='protective skip threshold (8 matches)')
+                    label='minimum for an E attempt (8 matches)')
     axes[0].set(ylabel='matches to selected keyframe',
                 title='Runtime LEVIO feature matches')
     axes[0].legend(loc='upper right', fontsize=8)
@@ -72,7 +72,10 @@ def aligned_samples(run_dir):
     capture_file = run_dir / 'capture_times.txt'
     if capture_file.exists():
         image_t = np.atleast_1d(np.loadtxt(capture_file))
-        poses = poses[:len(image_t)]
+        if len(image_t) != len(poses):
+            raise ValueError('Capture-time list and online trajectory have different lengths')
+        if not np.allclose(poses[:, 0], image_t, rtol=0, atol=1e-6):
+            raise ValueError('Online trajectory timestamps differ from RGB capture times')
     else:
         image_t = poses[:, 0]
     first_skip = summary.get('first_essential_skip_frame')
@@ -102,13 +105,19 @@ def aligned_samples(run_dir):
     expected = (summary['comparison_after_initialization'] if init is not None else
                 summary['comparison_to_euroc_groundtruth'] if summary.get('dataset') == 'euroc'
                 else summary['comparison_to_recorded_odometry'])
-    if not np.isclose(metric['se3_aligned_ate_rmse_m'],
-                      expected['se3_aligned_ate_rmse_m'], atol=1e-6):
-        raise ValueError(f'Plot/summary metric mismatch: {metric} vs {expected}')
-    if 'initial_pose_aligned_rmse_m' in expected and not np.isclose(
-            metric['initial_pose_aligned_rmse_m'],
-            expected['initial_pose_aligned_rmse_m'], atol=1e-6):
-        raise ValueError(f'First-pose metric mismatch: {metric} vs {expected}')
+    for key in ('matched_frames', 'se3_aligned_ate_rmse_m',
+                'initial_pose_aligned_rmse_m', 'initial_pose_aligned_end_error_m',
+                'endpoint_drift_rate_percent', 'estimated_path_length_m',
+                'reference_path_length_m'):
+        if key not in expected:
+            continue
+        actual, recorded = metric.get(key), expected[key]
+        if actual is None or recorded is None:
+            equal = actual is None and recorded is None
+        else:
+            equal = bool(np.isclose(actual, recorded, atol=1e-6))
+        if not equal:
+            raise ValueError(f'Plot/summary {key} mismatch: {actual} vs {recorded}')
     if not np.allclose(samples['reference'][0], samples['initial_pose_fit'][0],
                        atol=1e-9):
         raise ValueError('First-pose alignment did not make the starts coincide')

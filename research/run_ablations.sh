@@ -63,3 +63,39 @@ if container research/run_odom.py --bag research_data/run007.bag \
   exit 1
 fi
 [[ "$(< research_results/run007_filtered_imu/failure.txt)" == *'dt <=0'* ]]
+
+# Isolate run005 input phase, adjacent-image recovery and pre-initialization
+# translation scale in identical 300-frame windows. The two recovery modes are
+# also run over the full bag to reveal any long-horizon divergence.
+mkdir -p research_results/diagnostics_temporal
+for mode in baseline adjacent scale both retained_edges; do
+  options=()
+  case "$mode" in
+    adjacent) options=(--adjacent-recovery) ;;
+    scale) options=(--bootstrap-scale-until-initialized) ;;
+    both) options=(--adjacent-recovery --bootstrap-scale-until-initialized) ;;
+    retained_edges) options=(--retain-edge-frames) ;;
+  esac
+  output="research_results/diagnostics_temporal/run005_${mode}_300"
+  container research/run_odom.py --bag research_data/run005.bag --camera color \
+    --target-fps 20 --max-frames 300 "${options[@]}" --output "$output" \
+    --trace-output "$output/runtime_match_trace.csv" \
+    > "research_data/run005_${mode}_300.log" 2>&1
+done
+for mode in adjacent both; do
+  options=(--adjacent-recovery)
+  if [[ "$mode" == both ]]; then
+    options+=(--bootstrap-scale-until-initialized)
+  fi
+  output="research_results/diagnostics_temporal/run005_${mode}_full"
+  container research/run_odom.py --bag research_data/run005.bag --camera color \
+    --target-fps 20 "${options[@]}" --output "$output" \
+    --trace-output "$output/runtime_match_trace.csv" \
+    > "research_data/run005_${mode}_full.log" 2>&1
+  container research/plot_results.py --run-dir "$output" \
+    --output "research/figures/run005_${mode}_full_temporal.svg"
+done
+prefix=research_results/diagnostics_temporal/run005_baseline_300/online_frames.tum
+cmp -n "$(wc -c < "$prefix")" "$prefix" \
+  research_results/run005_color_20hz/online_frames.tum
+echo 'run005 baseline 300-frame online prefix matches the full run'

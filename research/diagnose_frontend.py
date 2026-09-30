@@ -29,7 +29,7 @@ def geometry(kps, prev_kps, matches, K):
     previous = np.array([prev_kps[m.trainIdx] for m in matches])
     try:
         essential, mask = cv2.findEssentialMat(current, previous, K, cv2.RANSAC)
-        if essential is None or mask is None:
+        if essential is None or essential.shape != (3, 3) or mask is None:
             return np.zeros(len(matches), dtype=bool), 0
         inliers = mask.ravel().astype(bool)
         if inliers.sum() < 5:
@@ -93,14 +93,26 @@ def run(args):
     next_time = None
     first_time = None
     snapshots = set()
+    capture_times = (np.atleast_1d(np.loadtxt(args.capture_times))
+                     if args.capture_times else None)
+    capture_index = 0
     for raw, stamp in extractor.img_generator():
+        if capture_times is not None:
+            if capture_index >= len(capture_times):
+                break
+            wanted = capture_times[capture_index]
+            if stamp < wanted - 1e-5:
+                continue
+            if abs(stamp - wanted) > 1e-5:
+                raise ValueError(f'Expected captured frame at {wanted}, found {stamp}')
+            capture_index += 1
         if first_time is None:
             first_time = stamp
             next_time = stamp
         elapsed = stamp - first_time
         if args.max_seconds and elapsed > args.max_seconds:
             break
-        if args.target_fps:
+        if args.target_fps and capture_times is None:
             if stamp + 1e-6 < next_time:
                 continue
             while next_time <= stamp + 1e-6:
@@ -140,6 +152,8 @@ def run(args):
         rows.append(row)
         previous = image, kps, descriptors
     extractor.bag.close()
+    if capture_times is not None and not args.max_seconds and capture_index != len(capture_times):
+        raise ValueError('Capture-time list has frames missing from the bag')
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     with (output / f'{args.label}.csv').open('w', newline='') as handle:
@@ -151,6 +165,7 @@ def run(args):
         'label': args.label, 'bag': args.bag, 'dataset': args.dataset,
         'camera': args.camera if args.dataset == 'odom' else 'cam0',
         'image_topic': topic, 'target_fps': args.target_fps,
+        'capture_times_source': str(args.capture_times) if args.capture_times else None,
         'frames': len(rows), 'duration_s': rows[-1]['time_s'],
         'keypoints': quantiles([r['keypoints'] for r in rows]),
         'occupied_cells_8x6': quantiles([r['occupied_cells_8x6'] for r in rows]),
@@ -173,6 +188,8 @@ if __name__ == '__main__':
     parser.add_argument('--camera', choices=['color', 'infra1'], default='color')
     parser.add_argument('--label', required=True)
     parser.add_argument('--target-fps', type=float, default=20)
+    parser.add_argument('--capture-times', type=Path,
+                        help='Use the exact images consumed by a VIO run')
     parser.add_argument('--max-seconds', type=float, default=40)
     parser.add_argument('--snapshot-seconds', type=int, nargs='*', default=[10])
     parser.add_argument('--figure-dir', default='research/figures')
